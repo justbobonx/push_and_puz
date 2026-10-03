@@ -1,3 +1,3 @@
 push & puz
 
-4 in a row pushes
+get your puz on
