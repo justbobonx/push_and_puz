@@ -4,7 +4,8 @@
   Odd count sits on the well. Even count straddles it.
   Match-3 on a straight slot line: neighbors in a row, the same slot
   across rows, or a diagonal stepping one or two slots per row.
-  Back-to-back shots are never the same color.
+  Two resolved shots per turn. Opponent front cannot match the last shot.
+  Empty rows refill from the board bag at end of turn. Refill does not fire matches.
   A visible disc on your end slot loses. Animation is not the grid.
 */
 
@@ -12,6 +13,8 @@ const ROWS = 7;
 const END = 15;
 const MATCH = 3;
 const QLEN = 3;
+const SHOTS = 2;
+const BOARD_SETS = 3;
 const COLS = [
   { fill: "#ff3b5c", hi: "#ffb6c6" },
   { fill: "#ff9f1a", hi: "#ffe3b8" },
@@ -31,8 +34,8 @@ const APP_VERSION = ((document.getElementById("puz-version") || {}).textContent 
 
 const state = {
   w: 0, h: 0, viewW: 0, viewH: 0, dpr: 1, portrait: false,
-  mode: "title", phase: "idle", phaseT: 0, turn: 0,
-  rows: [], bags: [[], []], chain: 0, chainT: 0,
+  mode: "title", phase: "idle", phaseT: 0, turn: 0, shotsLeft: SHOTS,
+  rows: [], bags: [[], []], boardBag: [], chain: 0, chainT: 0,
   loser: -1, last: 0, shot: null,
   boardLeft: 0, boardRight: 0, boardTop: 0, pitch: 0, half: 0, discR: 0, wellX: 0
 };
@@ -55,8 +58,12 @@ function colorPackOfSets(sets) {
   return shuffle(pack);
 }
 
-function colorPack(n) {
-  return colorPackOfSets(Math.ceil(n / COLS.length)).slice(0, n);
+function takeBoardColor() {
+  while (state.boardBag.length < COLS.length * BOARD_SETS) {
+    const more = colorPackOfSets(1);
+    for (let k = 0; k < more.length; k++) state.boardBag.push(more[k]);
+  }
+  return state.boardBag.shift();
 }
 
 function mixHex(a, b, t) {
@@ -74,7 +81,7 @@ function makeCell(color) {
 
 function freshRows() {
   const rows = [];
-  for (let r = 0; r < ROWS; r++) rows.push({ cells: [], lw: 0, rw: 0 });
+  for (let r = 0; r < ROWS; r++) rows.push({ cells: [], lw: 0, rw: 0, bal: 0, bvx: 0 });
   return rows;
 }
 
@@ -113,12 +120,6 @@ function slotsOf(row) {
   const out = new Array(n);
   for (let k = 0; k < n; k++) out[k] = s - (n - 1) + 2 * k;
   return out;
-}
-
-function sideOf(slot) {
-  if (slot < 0) return 0;
-  if (slot > 0) return 1;
-  return -1;
 }
 
 function findMatches() {
@@ -227,62 +228,63 @@ function snapCells() {
 }
 
 function markPops(hit) {
-  let mine = 0;
-  let other = 0;
-  const me = state.turn;
-  for (let r = 0; r < ROWS; r++) {
-    const row = state.rows[r];
-    const slots = slotsOf(row);
-    for (let i = 0; i < row.cells.length; i++) {
-      if (!hit.has(r + ":" + i)) continue;
-      if (sideOf(slots[i]) === me) mine++;
-      else other++;
-    }
-  }
-  const owner = mine > 0 && mine >= other ? me : -1;
-  state.popOwner = owner;
   for (let r = 0; r < ROWS; r++) {
     const row = state.rows[r];
     for (let i = 0; i < row.cells.length; i++) {
       if (!hit.has(r + ":" + i)) continue;
       row.cells[i].pop = 1;
-      row.cells[i].popSide = owner;
     }
   }
 }
 
 function finishPops() {
-  const owner = state.popOwner;
+  const me = state.turn;
   const cross = state.crossHits || new Set();
-  if (owner >= 0 && state.rowLines) {
+  const add = [];
+  for (let r = 0; r < ROWS; r++) add.push(0);
+  function ours(bal, slot) {
+    if (me === 0) return slot <= bal;
+    return slot >= bal;
+  }
+  if (state.rowLines) {
     for (let n = 0; n < state.rowLines.length; n++) {
       const line = state.rowLines[n];
-      let bare = false;
-      for (let k = 0; k < line.keys.length; k++) if (!cross.has(line.keys[k])) bare = true;
-      if (!bare) continue;
-      if (owner === 0) state.rows[line.r].lw++;
-      else state.rows[line.r].rw++;
+      const row = state.rows[line.r];
+      const slots = slotsOf(row);
+      const bal = row.lw - row.rw;
+      let pay = false;
+      for (let k = 0; k < line.keys.length; k++) {
+        const i = Number(line.keys[k].split(":")[1]);
+        if (ours(bal, slots[i])) pay = true;
+      }
+      if (pay) add[line.r]++;
     }
   }
   for (let r = 0; r < ROWS; r++) {
     const row = state.rows[r];
+    const slots = slotsOf(row);
+    const bal = row.lw - row.rw;
     const keep = [];
     for (let i = 0; i < row.cells.length; i++) {
       const c = row.cells[i];
       if (!c.pop) { keep.push(c); continue; }
-      if (owner >= 0 && cross.has(r + ":" + i)) {
-        if (owner === 0) row.lw++;
-        else row.rw++;
-      }
+      if (cross.has(r + ":" + i) && ours(bal, slots[i])) add[r]++;
     }
     row.cells = keep;
+  }
+  for (let r = 0; r < ROWS; r++) {
+    if (!add[r]) continue;
+    if (me === 0) state.rows[r].lw += add[r];
+    else state.rows[r].rw += add[r];
   }
 }
 
 function newGame() {
   state.rows = freshRows();
   state.bags = [colorPackOfSets(2), colorPackOfSets(2)];
+  state.boardBag = [];
   state.turn = Math.round(Math.random());
+  state.shotsLeft = SHOTS;
   settleFront(1 - state.turn, state.bags[state.turn][0]);
   state.phase = "idle";
   state.phaseT = 0;
@@ -292,15 +294,33 @@ function newGame() {
   state.shot = null;
   state.mode = "play";
   for (let n = 0; n < 40; n++) {
-    const pack = colorPack(ROWS * 2);
-    let k = 0;
+    const dealt = [];
     for (let r = 0; r < ROWS; r++) {
-      state.rows[r].cells = [makeCell(pack[k++]), makeCell(pack[k++])];
+      const a = takeBoardColor();
+      const b = takeBoardColor();
+      dealt.push(a, b);
+      state.rows[r].cells = [makeCell(a), makeCell(b)];
     }
     if (!findMatches().size) break;
+    for (let k = dealt.length - 1; k >= 0; k--) state.boardBag.unshift(dealt[k]);
+    shuffle(state.boardBag);
   }
   layoutTargets();
   snapCells();
+}
+
+function fillEmptyRows() {
+  for (let r = 0; r < ROWS; r++) {
+    const row = state.rows[r];
+    if (row.cells.length) continue;
+    const cell = makeCell(takeBoardColor());
+    const slot = row.lw - row.rw;
+    cell.x = slotX(slot);
+    cell.tx = cell.x;
+    cell.y = rowY(r);
+    cell.ty = cell.y;
+    row.cells.push(cell);
+  }
 }
 
 function requestPageFullscreen() {
@@ -404,13 +424,30 @@ function afterSettle() {
     state.loser = loss.left && loss.right ? 2 : (loss.left ? 0 : 1);
     return;
   }
-  state.turn = 1 - state.turn;
+  state.shotsLeft--;
+  if (state.shotsLeft <= 0) {
+    fillEmptyRows();
+    state.turn = 1 - state.turn;
+    state.shotsLeft = SHOTS;
+  }
   state.phase = "idle";
 }
 
 function update(dt) {
   if (state.mode === "title") return;
   if (state.chainT > 0) state.chainT -= dt;
+  const kBal = 78;
+  const dampBal = 9.5;
+  for (let r = 0; r < ROWS; r++) {
+    const row = state.rows[r];
+    const target = row.lw - row.rw;
+    row.bvx += ((target - row.bal) * kBal - row.bvx * dampBal) * dt;
+    row.bal += row.bvx * dt;
+    if (Math.abs(target - row.bal) < 0.02 && Math.abs(row.bvx) < 0.4) {
+      row.bal = target;
+      row.bvx = 0;
+    }
+  }
   if (state.mode === "over") return;
   state.phaseT += dt;
   if (state.phase === "fly") {
@@ -582,23 +619,45 @@ function draw() {
   ctx.moveTo(state.boardRight, state.boardTop);
   ctx.lineTo(state.boardRight, gridBottom);
   ctx.stroke();
-  ctx.strokeStyle = "rgba(150, 214, 255, 0.7)";
-  ctx.lineWidth = 2;
+  ctx.strokeStyle = "rgba(190, 206, 220, 0.28)";
+  ctx.lineWidth = 4;
   ctx.beginPath();
   ctx.moveTo(state.wellX, state.boardTop);
   ctx.lineTo(state.wellX, gridBottom);
   ctx.stroke();
   ctx.restore();
 
+  ctx.save();
+  ctx.strokeStyle = "rgba(255, 226, 140, 0.9)";
+  ctx.lineWidth = 3;
+  ctx.lineCap = "butt";
+  for (let r = 0; r < ROWS; r++) {
+    const row = state.rows[r];
+    let x = state.wellX + row.bal * state.half;
+    if (x < state.boardLeft) x = state.boardLeft;
+    if (x > state.boardRight) x = state.boardRight;
+    const y0 = state.boardTop + r * state.pitch;
+    ctx.beginPath();
+    ctx.moveTo(x, y0);
+    ctx.lineTo(x, y0 + state.pitch);
+    ctx.stroke();
+  }
+  ctx.restore();
+
   for (let r = 0; r < ROWS; r++) {
     const row = state.rows[r];
     const y = rowY(r);
+    const net = row.lw - row.rw;
     ctx.save();
     ctx.globalAlpha = 0.55;
-    ctx.fillStyle = PCOL[0];
-    if (row.lw) ctx.fillRect(state.boardLeft, y - 2, Math.min(state.half * row.lw, state.half * 6), 3);
-    ctx.fillStyle = PCOL[1];
-    if (row.rw) ctx.fillRect(state.boardRight - Math.min(state.half * row.rw, state.half * 6), y - 2, Math.min(state.half * row.rw, state.half * 6), 3);
+    if (net > 0) {
+      ctx.fillStyle = PCOL[0];
+      ctx.fillRect(state.boardLeft, y - 2, Math.min(state.half * net, state.boardRight - state.boardLeft), 3);
+    } else if (net < 0) {
+      ctx.fillStyle = PCOL[1];
+      const span = Math.min(state.half * -net, state.boardRight - state.boardLeft);
+      ctx.fillRect(state.boardRight - span, y - 2, span, 3);
+    }
     ctx.restore();
     for (let i = 0; i < row.cells.length; i++) {
       const c = row.cells[i];
@@ -622,6 +681,22 @@ function draw() {
 
   drawQueue(0);
   drawQueue(1);
+
+  if (state.mode === "play") {
+    ctx.save();
+    const pip = Math.max(3.5, state.pitch * 0.09);
+    const pipGap = pip * 3.1;
+    const pipX = state.turn === 0 ? state.boardLeft + pip * 2.2 : state.boardRight - pip * 2.2;
+    const pipY = state.boardTop - pip * 2.4;
+    for (let i = 0; i < SHOTS; i++) {
+      ctx.beginPath();
+      ctx.arc(pipX + (i - (SHOTS - 1) * 0.5) * pipGap, pipY, pip, 0, Math.PI * 2);
+      ctx.fillStyle = PCOL[state.turn];
+      ctx.globalAlpha = i < state.shotsLeft ? 0.92 : 0.2;
+      ctx.fill();
+    }
+    ctx.restore();
+  }
 
   ctx.save();
   ctx.textAlign = "center";
@@ -690,3 +765,4 @@ function frame(now) {
 bindInput();
 resize();
 requestAnimationFrame(frame);
+
